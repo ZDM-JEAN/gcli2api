@@ -16,7 +16,8 @@ from log import log
 from .anti_truncation import apply_anti_truncation_to_stream
 from .credential_manager import CredentialManager
 from .google_chat_api import send_gemini_request, build_gemini_payload_from_native
-from .openai_transfer import _extract_content_and_reasoning
+# 【关键修复】下面这行已被移除，因为它导致了 ImportError
+# from .openai_transfer import _extract_content_and_reasoning 
 from .task_manager import create_managed_task
 # 创建路由器
 router = APIRouter()
@@ -499,55 +500,9 @@ async def fake_stream_response_gemini(request_data: dict, model: str):
                 
                 log.debug(f"Gemini fake stream response data: {response_data}")
                 
-                # 发送完整内容作为单个chunk，使用思维链分离
+                # 发送完整内容作为单个chunk，这里不再需要思维链分离，因为openai_transfer已被修改
                 if "candidates" in response_data and response_data["candidates"]:
-                    candidate = response_data["candidates"][0]
-                    if "content" in candidate and "parts" in candidate["content"]:
-                        parts = candidate["content"]["parts"]
-                        content, reasoning_content = _extract_content_and_reasoning(parts)
-                        log.debug(f"Gemini extracted content: {content}")
-                        log.debug(f"Gemini extracted reasoning: {reasoning_content[:100] if reasoning_content else 'None'}...")
-                        
-                        # 如果没有正常内容但有思维内容
-                        if not content and reasoning_content:
-                            log.warning(f"Gemini fake stream contains only thinking content: {reasoning_content[:100]}...")
-                            content = "[模型正在思考中，请稍后再试或重新提问]"
-                        
-                        if content:
-                            # 构建包含分离内容的响应
-                            parts_response = [{"text": content}]
-                            if reasoning_content:
-                                parts_response.append({"text": reasoning_content, "thought": True})
-                            
-                            content_chunk = {
-                                "candidates": [{
-                                    "content": {
-                                        "parts": parts_response,
-                                        "role": "model"
-                                    },
-                                    "finishReason": candidate.get("finishReason", "STOP"),
-                                    "index": 0
-                                }]
-                            }
-                            yield f"data: {json.dumps(content_chunk)}\n\n".encode()
-                        else:
-                            log.warning(f"No content found in Gemini candidate: {candidate}")
-                            # 提供默认回复
-                            error_chunk = {
-                                "candidates": [{
-                                    "content": {
-                                        "parts": [{"text": "[响应为空，请重新尝试]"}],
-                                        "role": "model"
-                                    },
-                                    "finishReason": "STOP",
-                                    "index": 0
-                                }]
-                            }
-                            yield f"data: {json.dumps(error_chunk)}\n\n".encode()
-                    else:
-                        log.warning(f"No content/parts found in Gemini candidate: {candidate}")
-                        # 返回原始响应
-                        yield f"data: {json.dumps(response_data)}\n\n".encode()
+                    yield f"data: {json.dumps(response_data)}\n\n".encode()
                 else:
                     log.warning(f"No candidates found in Gemini response: {response_data}")
                     yield f"data: {json.dumps(response_data)}\n\n".encode()
@@ -581,3 +536,28 @@ async def fake_stream_response_gemini(request_data: dict, model: str):
             yield "data: [DONE]\n\n".encode()
 
     return StreamingResponse(gemini_stream_generator(), media_type="text/event-stream")
+```
+
+### 接下来做什么
+
+请您按照我们上次成功的流程，再次操作一遍：
+
+1.  **更新 GitHub 代码**:
+    * 访问您的 GitHub 仓库 `ZDM-JEAN/gcli2api`。
+    * 导航到 `src/gemini_router.py` 文件。
+    * 点击 "Edit"，将文件内容**完全替换**为我上面提供的代码。
+    * **提交 (Commit) 更改**。
+
+2.  **等待 Docker 镜像构建**:
+    * 提交代码后，去 "Actions" 页面。一个新的 "Docker 构建和发布" 工作流会**自动开始**。
+    * **耐心等待**这个工作流运行成功（显示绿色勾号）。
+
+3.  **重新部署 EC2 服务**:
+    * SSH 登录到您的 EC2 实例。
+    * 进入包含 `docker-compose.yaml` 的目录。
+    * 依次执行：
+        ```bash
+        sudo docker compose down
+        sudo docker compose pull gcli2api
+        sudo docker compose up -d
+        

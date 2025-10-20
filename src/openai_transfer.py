@@ -3,10 +3,9 @@ OpenAI Transfer Module - Handles conversion between OpenAI and Gemini API format
 被openai-router调用，负责OpenAI格式与Gemini格式的双向转换
 """
 
-from logging import INFO, info
 import time
 import uuid
-from typing import Dict, Any
+from typing import Dict, Any, List, Union
 
 from config import (
     DEFAULT_SAFETY_SETTINGS,
@@ -168,21 +167,35 @@ async def openai_request_to_gemini_payload(
     return {"model": get_base_model_name(openai_request.model), "request": request_data}
 
 
-def _extract_content_and_reasoning(parts: list) -> tuple:
-    """从Gemini响应部件中提取内容和推理内容"""
-    content = ""
-    reasoning_content = ""
+def _extract_parts_to_openai_content(parts: list) -> tuple:
+    """
+    从Gemini响应部件中提取内容（包括文本和图片）和推理内容。
+    现在返回一个OpenAI兼容的内容部分列表。
+    
+    Returns a tuple: (list_of_content_parts, reasoning_text_string)
+    """
+    content_parts = []
+    reasoning_content_parts = []  # 分别收集推理内容
 
     for part in parts:
-        # 处理文本内容
-        if part.get("text"):
-            # 检查这个部件是否包含thinking tokens
-            if part.get("thought", False):
-                reasoning_content += part.get("text", "")
-            else:
-                content += part.get("text", "")
+        if part.get("thought", False) and part.get("text"):
+            reasoning_content_parts.append(part.get("text", ""))
+        elif part.get("text"):
+            content_parts.append({"type": "text", "text": part.get("text")})
+        elif part.get("inlineData") and part["inlineData"].get("data"):
+            # 【关键修改】处理返回的图片数据
+            inline = part["inlineData"]
+            mime_type = inline.get("mimeType", "image/png")
+            data_b64 = inline.get("data")
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{data_b64}"
+                }
+            })
 
-    return content, reasoning_content
+    reasoning_text = "".join(reasoning_content_parts)
+    return content_parts, reasoning_text
 
 
 def _convert_usage_metadata(usage_metadata: Dict[str, Any]) -> Dict[str, int]:
@@ -206,7 +219,7 @@ def _convert_usage_metadata(usage_metadata: Dict[str, Any]) -> Dict[str, int]:
 
 
 def _build_message_with_reasoning(
-    role: str, content: str, reasoning_content: str
+    role: str, content: Union[str, list], reasoning_content: str
 ) -> dict:
     """构建包含可选推理内容的消息对象"""
     message = {"role": role, "content": content}
@@ -242,12 +255,20 @@ def gemini_response_to_openai(
         if role == "model":
             role = "assistant"
 
-        # 提取并分离thinking tokens和常规内容
+        # 【关键修改】使用新的函数来处理文本和图片
         parts = candidate.get("content", {}).get("parts", [])
-        content, reasoning_content = _extract_content_and_reasoning(parts)
+        content_parts, reasoning_content = _extract_parts_to_openai_content(parts)
+        
+        final_content = None
+        # 如果只有一个文本部分，为了兼容性，直接返回字符串
+        if len(content_parts) == 1 and content_parts[0]["type"] == "text":
+            final_content = content_parts[0]["text"]
+        # 如果有多个部分（文本+图片）或只有图片，返回列表
+        elif len(content_parts) > 0:
+            final_content = content_parts
 
         # 构建消息对象
-        message = _build_message_with_reasoning(role, content, reasoning_content)
+        message = _build_message_with_reasoning(role, final_content, reasoning_content)
 
         choices.append(
             {
@@ -298,14 +319,31 @@ def gemini_stream_chunk_to_openai(
         if role == "model":
             role = "assistant"
 
-        # 提取并分离thinking tokens和常规内容
+        # 【关键修改】提取并分离thinking tokens和常规内容（包括图片）
         parts = candidate.get("content", {}).get("parts", [])
-        content, reasoning_content = _extract_content_and_reasoning(parts)
+        content_text = ""
+        reasoning_content = ""
+        image_markdown = ""
+
+        for part in parts:
+            if part.get("thought", False) and part.get("text"):
+                reasoning_content += part.get("text", "")
+            elif part.get("text"):
+                content_text += part.get("text", "")
+            elif part.get("inlineData") and part["inlineData"].get("data"):
+                # 将图片数据转换为客户端可以渲染的Markdown格式文本
+                inline = part["inlineData"]
+                mime_type = inline.get("mimeType", "image/png")
+                data_b64 = inline.get("data")
+                image_markdown += f"\n![image](data:{mime_type};base64,{data_b64})\n"
+
+        # 合并文本和图片Markdown
+        final_content = content_text + image_markdown
 
         # 构建delta对象
         delta = {}
-        if content:
-            delta["content"] = content
+        if final_content:
+            delta["content"] = final_content
         if reasoning_content:
             delta["reasoning_content"] = reasoning_content
 
@@ -332,7 +370,6 @@ def gemini_stream_chunk_to_openai(
     }
 
     # 只有在有usage数据且这是最后一个chunk时才添加usage字段
-    # 这确保了codex-server能正确识别和记录用量
     if usage:
         has_finish_reason = any(choice.get("finish_reason") for choice in choices)
         if has_finish_reason:

@@ -199,8 +199,8 @@ def get_available_models(router_type="openai"):
         # 基础模型
         models.append(base_model)
         
-        if(base_model in PUBLIC_API_MODELS):
-            return models
+        #if(base_model in PUBLIC_API_MODELS):
+        #   return models
         
         # 假流式模型 (前缀格式)
         models.append(f"假流式/{base_model}")
